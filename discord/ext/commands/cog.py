@@ -3,7 +3,7 @@
 """
 The MIT License (MIT)
 
-Copyright (c) 2015-2020 Rapptz
+Copyright (c) 2015-present Rapptz
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -70,6 +70,11 @@ class CogMeta(type):
     -----------
     name: :class:`str`
         The cog name. By default, it is the name of the class with no modification.
+    description: :class:`str`
+        The cog description. By default, it is the cleaned docstring of the class.
+
+        .. versionadded:: 1.6
+
     command_attrs: :class:`dict`
         A list of attributes to apply to every command inside this cog. The dictionary
         is passed into the :class:`Command` options at ``__init__``.
@@ -91,7 +96,12 @@ class CogMeta(type):
     def __new__(cls, *args, **kwargs):
         name, bases, attrs = args
         attrs['__cog_name__'] = kwargs.pop('name', name)
-        attrs['__cog_settings__'] = command_attrs = kwargs.pop('command_attrs', {})
+        attrs['__cog_settings__'] = kwargs.pop('command_attrs', {})
+
+        description = kwargs.pop('description', None)
+        if description is None:
+            description = inspect.cleandoc(attrs.get('__doc__', ''))
+        attrs['__cog_description__'] = description
 
         commands = {}
         listeners = {}
@@ -116,7 +126,7 @@ class CogMeta(type):
                     commands[elem] = value
                 elif inspect.iscoroutinefunction(value):
                     try:
-                        is_listener = getattr(value, '__cog_listener__')
+                        getattr(value, '__cog_listener__')
                     except AttributeError:
                         continue
                     else:
@@ -182,7 +192,7 @@ class Cog(metaclass=CogMeta):
                 parent = lookup[parent.qualified_name]
 
                 # Update our parent's reference to our self
-                removed = parent.remove_command(command.name)
+                parent.remove_command(command.name)
                 parent.add_command(command)
 
         return self
@@ -209,14 +219,20 @@ class Cog(metaclass=CogMeta):
     @property
     def description(self):
         """:class:`str`: Returns the cog's description, typically the cleaned docstring."""
-        try:
-            return self.__cog_cleaned_doc__
-        except AttributeError:
-            self.__cog_cleaned_doc__ = cleaned = inspect.getdoc(self)
-            return cleaned
+        return self.__cog_description__
+
+    @description.setter
+    def description(self, description):
+        self.__cog_description__ = description
 
     def walk_commands(self):
-        """An iterator that recursively walks through this cog's commands and subcommands."""
+        """An iterator that recursively walks through this cog's commands and subcommands.
+
+        Yields
+        ------
+        Union[:class:`.Command`, :class:`.Group`]
+            A command or group from the cog.
+        """
         from .core import GroupMixin
         for command in self.__cog_commands__:
             if command.parent is None:
@@ -279,6 +295,13 @@ class Cog(metaclass=CogMeta):
             # thus the assignments need to be on the actual function
             return func
         return decorator
+
+    def has_error_handler(self):
+        """:class:`bool`: Checks whether the cog has an error handler.
+
+        .. versionadded:: 1.7
+        """
+        return hasattr(self.cog_command_error.__func__, '__cog_special_method__')
 
     @_cog_special_method
     def cog_unload(self):
@@ -385,7 +408,8 @@ class Cog(metaclass=CogMeta):
                 except Exception as e:
                     # undo our additions
                     for to_undo in self.__cog_commands__[:index]:
-                        bot.remove_command(to_undo.name)
+                        if to_undo.parent is None:
+                            bot.remove_command(to_undo.name)
                     raise e
 
         # check if we're overriding the default
@@ -421,4 +445,7 @@ class Cog(metaclass=CogMeta):
             if cls.bot_check_once is not Cog.bot_check_once:
                 bot.remove_check(self.bot_check_once, call_once=True)
         finally:
-            self.cog_unload()
+            try:
+                self.cog_unload()
+            except Exception:
+                pass

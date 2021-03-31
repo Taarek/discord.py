@@ -3,7 +3,7 @@
 """
 The MIT License (MIT)
 
-Copyright (c) 2015-2020 Rapptz
+Copyright (c) 2015-present Rapptz
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -24,7 +24,9 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+import inspect
 import itertools
+import sys
 from operator import attrgetter
 
 import discord.abc
@@ -33,7 +35,7 @@ from . import utils
 from .user import BaseUser, User
 from .activity import create_activity
 from .permissions import Permissions
-from .enums import Status, try_enum, UserFlags, HypeSquadHouse
+from .enums import Status, try_enum
 from .colour import Colour
 from .object import Object
 
@@ -105,14 +107,19 @@ def flatten_user(cls):
             # It probably breaks something in Sphinx.
             # probably a member function by now
             def generate_function(x):
-                def general(self, *args, **kwargs):
-                    return getattr(self._user, x)(*args, **kwargs)
+                # We want sphinx to properly show coroutine functions as coroutines
+                if inspect.iscoroutinefunction(value):
+                    async def general(self, *args, **kwargs):
+                        return await getattr(self._user, x)(*args, **kwargs)
+                else:
+                    def general(self, *args, **kwargs):
+                        return getattr(self._user, x)(*args, **kwargs)
 
                 general.__name__ = x
                 return general
 
             func = generate_function(attr)
-            func.__doc__ = value.__doc__
+            func = utils.copy_doc(value)(func)
             setattr(cls, attr, func)
 
     return cls
@@ -156,13 +163,17 @@ class Member(discord.abc.Messageable, _BaseUser):
         The guild that the member belongs to.
     nick: Optional[:class:`str`]
         The guild specific nickname of the user.
+    pending: :class:`bool`
+        Whether the member is pending member verification.
+
+        .. versionadded:: 1.6
     premium_since: Optional[:class:`datetime.datetime`]
         A datetime object that specifies the date and time in UTC when the member used their
         Nitro boost on the guild, if available. This could be ``None``.
     """
 
     __slots__ = ('_roles', 'joined_at', 'premium_since', '_client_status',
-                 'activities', 'guild', 'nick', '_user', '_state')
+                 'activities', 'guild', 'pending', 'nick', '_user', '_state')
 
     def __init__(self, *, data, guild, state):
         self._state = state
@@ -176,6 +187,7 @@ class Member(discord.abc.Messageable, _BaseUser):
         }
         self.activities = tuple(map(create_activity, data.get('activities', [])))
         self.nick = data.get('nick', None)
+        self.pending = data.get('pending', False)
 
     def __str__(self):
         return str(self._user)
@@ -204,6 +216,7 @@ class Member(discord.abc.Messageable, _BaseUser):
         self.premium_since = utils.parse_time(data.get('premium_since'))
         self._update_roles(data)
         self.nick = data.get('nick', None)
+        self.pending = data.get('pending', False)
 
     @classmethod
     def _try_upgrade(cls, *,  data, guild, state):
@@ -221,10 +234,10 @@ class Member(discord.abc.Messageable, _BaseUser):
         clone = cls(data=data, guild=guild, state=state)
         to_return = cls(data=data, guild=guild, state=state)
         to_return._client_status = {
-            key: value
+            sys.intern(key): sys.intern(value)
             for key, value in data.get('client_status', {}).items()
         }
-        to_return._client_status[None] = data['status']
+        to_return._client_status[None] = sys.intern(data['status'])
         return to_return, clone
 
     @classmethod
@@ -237,6 +250,7 @@ class Member(discord.abc.Messageable, _BaseUser):
         self._client_status = member._client_status.copy()
         self.guild = member.guild
         self.nick = member.nick
+        self.pending = member.pending
         self.activities = member.activities
         self._state = member._state
 
@@ -260,33 +274,49 @@ class Member(discord.abc.Messageable, _BaseUser):
         except KeyError:
             pass
 
+        try:
+            self.pending = data['pending']
+        except KeyError:
+            pass
+
         self.premium_since = utils.parse_time(data.get('premium_since'))
         self._update_roles(data)
 
     def _presence_update(self, data, user):
         self.activities = tuple(map(create_activity, data.get('activities', [])))
         self._client_status = {
-            key: value
+            sys.intern(key): sys.intern(value)
             for key, value in data.get('client_status', {}).items()
         }
-        self._client_status[None] = data['status']
+        self._client_status[None] = sys.intern(data['status'])
 
         if len(user) > 1:
-            u = self._user
-            original = (u.name, u.avatar, u.discriminator)
-            # These keys seem to always be available
-            modified = (user['username'], user['avatar'], user['discriminator'])
-            if original != modified:
-                to_return = User._copy(self._user)
-                u.name, u.avatar, u.discriminator = modified
-                # Signal to dispatch on_user_update
-                return to_return, u
+            return self._update_inner_user(user)
         return False
+
+    def _update_inner_user(self, user):
+        u = self._user
+        original = (u.name, u.avatar, u.discriminator, u._public_flags)
+        # These keys seem to always be available
+        modified = (user['username'], user['avatar'], user['discriminator'], user.get('public_flags', 0))
+        if original != modified:
+            to_return = User._copy(self._user)
+            u.name, u.avatar, u.discriminator, u._public_flags = modified
+            # Signal to dispatch on_user_update
+            return to_return, u
 
     @property
     def status(self):
         """:class:`Status`: The member's overall status. If the value is unknown, then it will be a :class:`str` instead."""
         return try_enum(Status, self._client_status[None])
+
+    @property
+    def raw_status(self):
+        """:class:`str`: The member's overall status as a string value.
+
+        .. versionadded:: 1.5
+        """
+        return self._client_status[None]
 
     @status.setter
     def status(self, value):
@@ -309,7 +339,7 @@ class Member(discord.abc.Messageable, _BaseUser):
         return try_enum(Status, self._client_status.get('web', 'offline'))
 
     def is_on_mobile(self):
-        """A helper function that determines if a member is active on a mobile device."""
+        """:class:`bool`: A helper function that determines if a member is active on a mobile device."""
         return 'mobile' in self._client_status
 
     @property
@@ -374,7 +404,7 @@ class Member(discord.abc.Messageable, _BaseUser):
         if they have a guild specific nickname then that
         is returned instead.
         """
-        return self.nick if self.nick is not None else self.name
+        return self.nick or self.name
 
     @property
     def activity(self):
@@ -395,6 +425,11 @@ class Member(discord.abc.Messageable, _BaseUser):
         -----------
         message: :class:`Message`
             The message to check if you're mentioned in.
+
+        Returns
+        -------
+        :class:`bool`
+            Indicates if the member is mentioned in the message.
         """
         if message.guild is None or message.guild.id != self.guild.id:
             return False
@@ -402,11 +437,7 @@ class Member(discord.abc.Messageable, _BaseUser):
         if self._user.mentioned_in(message):
             return True
 
-        for role in message.role_mentions:
-            if self._roles.has(role.id):
-                return True
-
-        return False
+        return any(self._roles.has(role.id) for role in message.role_mentions)
 
     def permissions_in(self, channel):
         """An alias for :meth:`abc.GuildChannel.permissions_for`.
@@ -553,7 +584,7 @@ class Member(discord.abc.Messageable, _BaseUser):
             # nick not present so...
             pass
         else:
-            nick = nick if nick else ''
+            nick = nick or ''
             if self._state.self_id == self.id:
                 await http.change_my_nickname(guild_id, nick, reason=reason)
             else:
@@ -614,7 +645,8 @@ class Member(discord.abc.Messageable, _BaseUser):
         Gives the member a number of :class:`Role`\s.
 
         You must have the :attr:`~Permissions.manage_roles` permission to
-        use this.
+        use this, and the added :class:`Role`\s must appear lower in the list
+        of roles than the highest role of the member.
 
         Parameters
         -----------
@@ -652,7 +684,8 @@ class Member(discord.abc.Messageable, _BaseUser):
         Removes :class:`Role`\s from this member.
 
         You must have the :attr:`~Permissions.manage_roles` permission to
-        use this.
+        use this, and the removed :class:`Role`\s must appear lower in the list
+        of roles than the highest role of the member.
 
         Parameters
         -----------

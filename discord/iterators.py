@@ -3,7 +3,7 @@
 """
 The MIT License (MIT)
 
-Copyright (c) 2015-2020 Rapptz
+Copyright (c) 2015-present Rapptz
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -28,7 +28,7 @@ import asyncio
 import datetime
 
 from .errors import NoMoreItems
-from .utils import DISCORD_EPOCH, time_snowflake, maybe_coroutine
+from .utils import time_snowflake, maybe_coroutine
 from .object import Object
 from .audit_logs import AuditLogEntry
 
@@ -62,6 +62,11 @@ class _AsyncIterator:
             if ret:
                 return elem
 
+    def chunk(self, max_size):
+        if max_size <= 0:
+            raise ValueError('async iterator chunk sizes must be greater than 0.')
+        return _ChunkedAsyncIterator(self, max_size)
+
     def map(self, func):
         return _MappedAsyncIterator(self, func)
 
@@ -91,6 +96,26 @@ class _AsyncIterator:
 
 def _identity(x):
     return x
+
+class _ChunkedAsyncIterator(_AsyncIterator):
+    def __init__(self, iterator, max_size):
+        self.iterator = iterator
+        self.max_size = max_size
+
+    async def next(self):
+        ret = []
+        n = 0
+        while n < self.max_size:
+            try:
+                item = await self.iterator.next()
+            except NoMoreItems:
+                if ret:
+                    return ret
+                raise
+            else:
+                ret.append(item)
+                n += 1
+        return ret
 
 class _MappedAsyncIterator(_AsyncIterator):
     def __init__(self, iterator, func):
@@ -266,13 +291,10 @@ class HistoryIterator(_AsyncIterator):
 
     def _get_retrieve(self):
         l = self.limit
-        if l is None:
+        if l is None or l > 100:
             r = 100
-        elif l <= 100:
-            r = l
         else:
-            r = 100
-
+            r = l
         self.retrieve = r
         return r > 0
 
@@ -422,13 +444,10 @@ class AuditLogIterator(_AsyncIterator):
 
     def _get_retrieve(self):
         l = self.limit
-        if l is None:
+        if l is None or l > 100:
             r = 100
-        elif l <= 100:
-            r = l
         else:
-            r = 100
-
+            r = l
         self.retrieve = r
         return r > 0
 
@@ -522,13 +541,10 @@ class GuildIterator(_AsyncIterator):
 
     def _get_retrieve(self):
         l = self.limit
-        if l is None:
+        if l is None or l > 100:
             r = 100
-        elif l <= 100:
-            r = l
         else:
-            r = 100
-
+            r = l
         self.retrieve = r
         return r > 0
 
@@ -611,13 +627,10 @@ class MemberIterator(_AsyncIterator):
 
     def _get_retrieve(self):
         l = self.limit
-        if l is None:
+        if l is None or l > 1000:
             r = 1000
-        elif l <= 1000:
-            r = l
         else:
-            r = 1000
-
+            r = l
         self.retrieve = r
         return r > 0
 

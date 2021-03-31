@@ -3,7 +3,7 @@
 """
 The MIT License (MIT)
 
-Copyright (c) 2015-2020 Rapptz
+Copyright (c) 2015-present Rapptz
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -50,6 +50,11 @@ __all__ = (
     'FFmpegOpusAudio',
     'PCMVolumeTransformer',
 )
+
+if sys.platform != 'win32':
+    CREATE_NO_WINDOW = 0
+else:
+    CREATE_NO_WINDOW = 0x08000000
 
 class AudioSource:
     """Represents an audio stream.
@@ -136,7 +141,7 @@ class FFmpegAudio(AudioSource):
     def _spawn_process(self, args, **subprocess_kwargs):
         process = None
         try:
-            process = subprocess.Popen(args, **subprocess_kwargs)
+            process = subprocess.Popen(args, creationflags=CREATE_NO_WINDOW, **subprocess_kwargs)
         except FileNotFoundError:
             executable = args.partition(' ')[0] if isinstance(args, str) else args[0]
             raise ClientException(executable + ' was not found.') from None
@@ -469,7 +474,7 @@ class FFmpegOpusAudio(FFmpegAudio):
     @staticmethod
     def _probe_codec_fallback(source, executable='ffmpeg'):
         args = [executable, '-hide_banner', '-i',  source]
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(args, creationflags=CREATE_NO_WINDOW, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out, _ = proc.communicate(timeout=20)
         output = out.decode('utf8')
         codec = bitrate = None

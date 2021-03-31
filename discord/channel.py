@@ -3,7 +3,7 @@
 """
 The MIT License (MIT)
 
-Copyright (c) 2015-2020 Rapptz
+Copyright (c) 2015-present Rapptz
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -34,7 +34,6 @@ from .mixins import Hashable
 from . import utils
 from .asset import Asset
 from .errors import ClientException, NoMoreItems, InvalidArgument
-from .webhook import Webhook
 
 __all__ = (
     'TextChannel',
@@ -142,6 +141,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
     def _sorting_bucket(self):
         return ChannelType.text.value
 
+    @utils.copy_doc(discord.abc.GuildChannel.permissions_for)
     def permissions_for(self, member):
         base = super().permissions_for(member)
 
@@ -150,19 +150,17 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         base.value &= ~denied.value
         return base
 
-    permissions_for.__doc__ = discord.abc.GuildChannel.permissions_for.__doc__
-
     @property
     def members(self):
         """List[:class:`Member`]: Returns all members that can see this channel."""
         return [m for m in self.guild.members if self.permissions_for(m).read_messages]
 
     def is_nsfw(self):
-        """Checks if the channel is NSFW."""
+        """:class:`bool`: Checks if the channel is NSFW."""
         return self.nsfw
 
     def is_news(self):
-        """Checks if the channel is a news channel."""
+        """:class:`bool`: Checks if the channel is a news channel."""
         return self._type == ChannelType.news.value
 
     @property
@@ -221,7 +219,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
             A value of `0` disables slowmode. The maximum value possible is `21600`.
         type: :class:`ChannelType`
             Change the type of this text channel. Currently, only conversion between
-            :attr:`ChannelType.text` and :attr:`ChannelType.news` is supported. This 
+            :attr:`ChannelType.text` and :attr:`ChannelType.news` is supported. This
             is only available to guilds that contain ``NEWS`` in :attr:`Guild.features`.
         reason: Optional[:class:`str`]
             The reason for editing this channel. Shows up on the audit log.
@@ -241,14 +239,13 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         """
         await self._edit(options, reason=reason)
 
+    @utils.copy_doc(discord.abc.GuildChannel.clone)
     async def clone(self, *, name=None, reason=None):
         return await self._clone_impl({
             'topic': self.topic,
             'nsfw': self.nsfw,
             'rate_limit_per_user': self.slowmode_delay
         }, name=name, reason=reason)
-
-    clone.__doc__ = discord.abc.GuildChannel.clone.__doc__
 
     async def delete_messages(self, messages):
         """|coro|
@@ -348,7 +345,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         bulk: :class:`bool`
             If ``True``, use bulk delete. Setting this to ``False`` is useful for mass-deleting
             a bot's own messages without :attr:`Permissions.manage_messages`. When ``True``, will
-            fall back to single delete if current account is a user bot, or if messages are
+            fall back to single delete if current account is a user bot (now deprecated), or if messages are
             older than two weeks.
 
         Raises
@@ -429,6 +426,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
             The webhooks for this channel.
         """
 
+        from .webhook import Webhook
         data = await self._state.http.channel_webhooks(self.id)
         return [Webhook.from_state(d, state=self._state) for d in data]
 
@@ -465,6 +463,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
             The created webhook.
         """
 
+        from .webhook import Webhook
         if avatar is not None:
             avatar = utils._bytes_to_base64_data(avatar)
 
@@ -512,8 +511,31 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         if not isinstance(destination, TextChannel):
             raise InvalidArgument('Expected TextChannel received {0.__name__}'.format(type(destination)))
 
+        from .webhook import Webhook
         data = await self._state.http.follow_webhook(self.id, webhook_channel_id=destination.id, reason=reason)
         return Webhook._as_follower(data, channel=destination, user=self._state.user)
+
+    def get_partial_message(self, message_id):
+        """Creates a :class:`PartialMessage` from the message ID.
+
+        This is useful if you want to work with a message and only have its ID without
+        doing an unnecessary API call.
+
+        .. versionadded:: 1.6
+
+        Parameters
+        ------------
+        message_id: :class:`int`
+            The message ID to create a partial message for.
+
+        Returns
+        ---------
+        :class:`PartialMessage`
+            The partial message.
+        """
+
+        from .message import PartialMessage
+        return PartialMessage(channel=self, id=message_id)
 
 class VoiceChannel(discord.abc.Connectable, discord.abc.GuildChannel, Hashable):
     """Represents a Discord guild voice channel.
@@ -627,6 +649,7 @@ class VoiceChannel(discord.abc.Connectable, discord.abc.GuildChannel, Hashable):
         """
         return {key: value for key, value in self.guild._voice_states.items() if value.channel.id == self.id}
 
+    @utils.copy_doc(discord.abc.GuildChannel.permissions_for)
     def permissions_for(self, member):
         base = super().permissions_for(member)
 
@@ -638,15 +661,12 @@ class VoiceChannel(discord.abc.Connectable, discord.abc.GuildChannel, Hashable):
             base.value &= ~denied.value
         return base
 
-    permissions_for.__doc__ = discord.abc.GuildChannel.permissions_for.__doc__
-
+    @utils.copy_doc(discord.abc.GuildChannel.clone)
     async def clone(self, *, name=None, reason=None):
         return await self._clone_impl({
             'bitrate': self.bitrate,
             'user_limit': self.user_limit
         }, name=name, reason=reason)
-
-    clone.__doc__ = discord.abc.GuildChannel.clone.__doc__
 
     async def edit(self, *, reason=None, **options):
         """|coro|
@@ -757,15 +777,14 @@ class CategoryChannel(discord.abc.GuildChannel, Hashable):
         return ChannelType.category
 
     def is_nsfw(self):
-        """Checks if the category is NSFW."""
+        """:class:`bool`: Checks if the category is NSFW."""
         return self.nsfw
 
+    @utils.copy_doc(discord.abc.GuildChannel.clone)
     async def clone(self, *, name=None, reason=None):
         return await self._clone_impl({
             'nsfw': self.nsfw
         }, name=name, reason=reason)
-
-    clone.__doc__ = discord.abc.GuildChannel.clone.__doc__
 
     async def edit(self, *, reason=None, **options):
         """|coro|
@@ -803,6 +822,11 @@ class CategoryChannel(discord.abc.GuildChannel, Hashable):
         """
 
         await self._edit(options=options, reason=reason)
+
+    @utils.copy_doc(discord.abc.GuildChannel.move)
+    async def move(self, **kwargs):
+        kwargs.pop('category', None)
+        await super().move(**kwargs)
 
     @property
     def channels(self):
@@ -922,6 +946,7 @@ class StoreChannel(discord.abc.GuildChannel, Hashable):
         """:class:`ChannelType`: The channel's Discord type."""
         return ChannelType.store
 
+    @utils.copy_doc(discord.abc.GuildChannel.permissions_for)
     def permissions_for(self, member):
         base = super().permissions_for(member)
 
@@ -930,18 +955,15 @@ class StoreChannel(discord.abc.GuildChannel, Hashable):
         base.value &= ~denied.value
         return base
 
-    permissions_for.__doc__ = discord.abc.GuildChannel.permissions_for.__doc__
-
     def is_nsfw(self):
-        """Checks if the channel is NSFW."""
+        """:class:`bool`: Checks if the channel is NSFW."""
         return self.nsfw
 
+    @utils.copy_doc(discord.abc.GuildChannel.clone)
     async def clone(self, *, name=None, reason=None):
         return await self._clone_impl({
             'nsfw': self.nsfw
         }, name=name, reason=reason)
-
-    clone.__doc__ = discord.abc.GuildChannel.clone.__doc__
 
     async def edit(self, *, reason=None, **options):
         """|coro|
@@ -1072,6 +1094,28 @@ class DMChannel(discord.abc.Messageable, Hashable):
         base.manage_messages = False
         return base
 
+    def get_partial_message(self, message_id):
+        """Creates a :class:`PartialMessage` from the message ID.
+
+        This is useful if you want to work with a message and only have its ID without
+        doing an unnecessary API call.
+
+        .. versionadded:: 1.6
+
+        Parameters
+        ------------
+        message_id: :class:`int`
+            The message ID to create a partial message for.
+
+        Returns
+        ---------
+        :class:`PartialMessage`
+            The partial message.
+        """
+
+        from .message import PartialMessage
+        return PartialMessage(channel=self, id=message_id)
+
 class GroupChannel(discord.abc.Messageable, Hashable):
     """Represents a Discord group channel.
 
@@ -1154,8 +1198,39 @@ class GroupChannel(discord.abc.Messageable, Hashable):
 
     @property
     def icon_url(self):
-        """:class:`Asset`: Returns the channel's icon asset if available."""
-        return Asset._from_icon(self._state, self, 'channel')
+        """:class:`Asset`: Returns the channel's icon asset if available.
+
+        This is equivalent to calling :meth:`icon_url_as` with
+        the default parameters ('webp' format and a size of 1024).
+        """
+        return self.icon_url_as()
+
+    def icon_url_as(self, *, format='webp', size=1024):
+        """Returns an :class:`Asset` for the icon the channel has.
+
+        The format must be one of 'webp', 'jpeg', 'jpg' or 'png'.
+        The size must be a power of 2 between 16 and 4096.
+
+        .. versionadded:: 2.0
+
+        Parameters
+        -----------
+        format: :class:`str`
+            The format to attempt to convert the icon to. Defaults to 'webp'.
+        size: :class:`int`
+            The size of the image to display.
+
+        Raises
+        ------
+        InvalidArgument
+            Bad image format passed to ``format`` or invalid ``size``.
+
+        Returns
+        --------
+        :class:`Asset`
+            The resulting CDN asset.
+        """
+        return Asset._from_icon(self._state, self, 'channel', format=format, size=size)
 
     @property
     def created_at(self):
@@ -1171,8 +1246,8 @@ class GroupChannel(discord.abc.Messageable, Hashable):
 
         This returns all the Text related permissions set to ``True`` except:
 
-        - send_tts_messages: You cannot send TTS messages in a DM.
-        - manage_messages: You cannot delete others messages in a DM.
+        - :attr:`~Permissions.send_tts_messages`: You cannot send TTS messages in a DM.
+        - :attr:`~Permissions.manage_messages`: You cannot delete others messages in a DM.
 
         This also checks the kick_members permission if the user is the owner.
 
@@ -1197,6 +1272,7 @@ class GroupChannel(discord.abc.Messageable, Hashable):
 
         return base
 
+    @utils.deprecated()
     async def add_recipients(self, *recipients):
         r"""|coro|
 
@@ -1206,6 +1282,8 @@ class GroupChannel(discord.abc.Messageable, Hashable):
         Attempting to add more ends up in an exception. To
         add a recipient to the group, you must have a relationship
         with the user of type :attr:`RelationshipType.friend`.
+
+        .. deprecated:: 1.7
 
         Parameters
         -----------
@@ -1224,10 +1302,13 @@ class GroupChannel(discord.abc.Messageable, Hashable):
         for recipient in recipients:
             await req(self.id, recipient.id)
 
+    @utils.deprecated()
     async def remove_recipients(self, *recipients):
         r"""|coro|
 
         Removes recipients from this group.
+
+        .. deprecated:: 1.7
 
         Parameters
         -----------
@@ -1246,10 +1327,13 @@ class GroupChannel(discord.abc.Messageable, Hashable):
         for recipient in recipients:
             await req(self.id, recipient.id)
 
+    @utils.deprecated()
     async def edit(self, **fields):
         """|coro|
 
         Edits the group.
+
+        .. deprecated:: 1.7
 
         Parameters
         -----------

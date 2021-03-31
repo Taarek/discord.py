@@ -3,7 +3,7 @@
 """
 The MIT License (MIT)
 
-Copyright (c) 2015-2020 Rapptz
+Copyright (c) 2015-present Rapptz
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -685,6 +685,7 @@ class CustomActivity(BaseActivity):
     __slots__ = ('name', 'emoji', 'state')
 
     def __init__(self, name, *, emoji=None, **extra):
+        super().__init__(**extra)
         self.name = name
         self.state = extra.pop('state', None)
         if self.name == 'Custom Status':
@@ -692,8 +693,14 @@ class CustomActivity(BaseActivity):
 
         if emoji is None:
             self.emoji = emoji
-        else:
+        elif isinstance(emoji, dict):
             self.emoji = PartialEmoji.from_dict(emoji)
+        elif isinstance(emoji, str):
+            self.emoji = PartialEmoji(name=emoji)
+        elif isinstance(emoji, PartialEmoji):
+            self.emoji = emoji
+        else:
+            raise TypeError('Expected str, PartialEmoji, or None, received {0!r} instead.'.format(type(emoji)))
 
     @property
     def type(self):

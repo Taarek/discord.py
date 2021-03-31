@@ -3,7 +3,7 @@
 """
 The MIT License (MIT)
 
-Copyright (c) 2015-2020 Rapptz
+Copyright (c) 2015-present Rapptz
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"),
@@ -37,8 +37,10 @@ __all__ = (
     'MemberConverter',
     'UserConverter',
     'MessageConverter',
+    'PartialMessageConverter',
     'TextChannelConverter',
     'InviteConverter',
+    'GuildConverter',
     'RoleConverter',
     'GameConverter',
     'ColourConverter',
@@ -100,7 +102,7 @@ class Converter:
 
 class IDConverter(Converter):
     def __init__(self):
-        self._id_regex = re.compile(r'([0-9]{15,21})$')
+        self._id_regex = re.compile(r'([0-9]{15,20})$')
         super().__init__()
 
     def _get_id_match(self, argument):
@@ -122,13 +124,49 @@ class MemberConverter(IDConverter):
 
     .. versionchanged:: 1.5
          Raise :exc:`.MemberNotFound` instead of generic :exc:`.BadArgument`
+
+    .. versionchanged:: 1.5.1
+        This converter now lazily fetches members from the gateway and HTTP APIs,
+        optionally caching the result if :attr:`.MemberCacheFlags.joined` is enabled.
     """
+
+    async def query_member_named(self, guild, argument):
+        cache = guild._state.member_cache_flags.joined
+        if len(argument) > 5 and argument[-5] == '#':
+            username, _, discriminator = argument.rpartition('#')
+            members = await guild.query_members(username, limit=100, cache=cache)
+            return discord.utils.get(members, name=username, discriminator=discriminator)
+        else:
+            members = await guild.query_members(argument, limit=100, cache=cache)
+            return discord.utils.find(lambda m: m.name == argument or m.nick == argument, members)
+
+    async def query_member_by_id(self, bot, guild, user_id):
+        ws = bot._get_websocket(shard_id=guild.shard_id)
+        cache = guild._state.member_cache_flags.joined
+        if ws.is_ratelimited():
+            # If we're being rate limited on the WS, then fall back to using the HTTP API
+            # So we don't have to wait ~60 seconds for the query to finish
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.HTTPException:
+                return None
+
+            if cache:
+                guild._add_member(member)
+            return member
+
+        # If we're not being rate limited then we can use the websocket to actually query
+        members = await guild.query_members(limit=1, user_ids=[user_id], cache=cache)
+        if not members:
+            return None
+        return members[0]
 
     async def convert(self, ctx, argument):
         bot = ctx.bot
         match = self._get_id_match(argument) or re.match(r'<@!?([0-9]+)>$', argument)
         guild = ctx.guild
         result = None
+        user_id = None
         if match is None:
             # not a mention...
             if guild:
@@ -143,7 +181,16 @@ class MemberConverter(IDConverter):
                 result = _get_from_guilds(bot, 'get_member', user_id)
 
         if result is None:
-            raise MemberNotFound(argument)
+            if guild is None:
+                raise MemberNotFound(argument)
+
+            if user_id is not None:
+                result = await self.query_member_by_id(bot, guild, user_id)
+            else:
+                result = await self.query_member_named(guild, argument)
+
+            if not result:
+                raise MemberNotFound(argument)
 
         return result
 
@@ -161,6 +208,10 @@ class UserConverter(IDConverter):
 
     .. versionchanged:: 1.5
          Raise :exc:`.UserNotFound` instead of generic :exc:`.BadArgument`
+
+    .. versionchanged:: 1.6
+        This converter now lazily fetches users from the HTTP APIs if an ID is passed
+        and it's not available in cache.
     """
     async def convert(self, ctx, argument):
         match = self._get_id_match(argument) or re.match(r'<@!?([0-9]+)>$', argument)
@@ -170,32 +221,70 @@ class UserConverter(IDConverter):
         if match is not None:
             user_id = int(match.group(1))
             result = ctx.bot.get_user(user_id) or _utils_get(ctx.message.mentions, id=user_id)
-        else:
-            arg = argument
+            if result is None:
+                try:
+                    result = await ctx.bot.fetch_user(user_id)
+                except discord.HTTPException:
+                    raise UserNotFound(argument) from None
 
-            # Remove the '@' character if this is the first character from the argument
-            if arg[0] == '@':
-                # Remove first character
-                arg = arg[1:]
+            return result
 
-            # check for discriminator if it exists,
-            if len(arg) > 5 and arg[-5] == '#':
-                discrim = arg[-4:]
-                name = arg[:-5]
-                predicate = lambda u: u.name == name and u.discriminator == discrim
-                result = discord.utils.find(predicate, state._users.values())
-                if result is not None:
-                    return result
+        arg = argument
 
-            predicate = lambda u: u.name == arg
+        # Remove the '@' character if this is the first character from the argument
+        if arg[0] == '@':
+            # Remove first character
+            arg = arg[1:]
+
+        # check for discriminator if it exists,
+        if len(arg) > 5 and arg[-5] == '#':
+            discrim = arg[-4:]
+            name = arg[:-5]
+            predicate = lambda u: u.name == name and u.discriminator == discrim
             result = discord.utils.find(predicate, state._users.values())
+            if result is not None:
+                return result
+
+        predicate = lambda u: u.name == arg
+        result = discord.utils.find(predicate, state._users.values())
 
         if result is None:
             raise UserNotFound(argument)
 
         return result
 
-class MessageConverter(Converter):
+class PartialMessageConverter(Converter):
+    """Converts to a :class:`discord.PartialMessage`.
+
+    .. versionadded:: 1.7
+
+    The creation strategy is as follows (in order):
+
+    1. By "{channel ID}-{message ID}" (retrieved by shift-clicking on "Copy ID")
+    2. By message ID (The message is assumed to be in the context channel.)
+    3. By message URL
+    """
+    def _get_id_matches(self, argument):
+        id_regex = re.compile(r'(?:(?P<channel_id>[0-9]{15,20})-)?(?P<message_id>[0-9]{15,20})$')
+        link_regex = re.compile(
+            r'https?://(?:(ptb|canary|www)\.)?discord(?:app)?\.com/channels/'
+            r'(?:[0-9]{15,20}|@me)'
+            r'/(?P<channel_id>[0-9]{15,20})/(?P<message_id>[0-9]{15,20})/?$'
+        )
+        match = id_regex.match(argument) or link_regex.match(argument)
+        if not match:
+            raise MessageNotFound(argument)
+        channel_id = match.group("channel_id")
+        return int(match.group("message_id")), int(channel_id) if channel_id else None
+
+    async def convert(self, ctx, argument):
+        message_id, channel_id = self._get_id_matches(argument)
+        channel = ctx.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if not channel:
+            raise ChannelNotFound(channel_id)
+        return discord.PartialMessage(channel=channel, id=message_id)
+
+class MessageConverter(PartialMessageConverter):
     """Converts to a :class:`discord.Message`.
 
     .. versionadded:: 1.1
@@ -207,25 +296,14 @@ class MessageConverter(Converter):
     3. Lookup by message URL
 
     .. versionchanged:: 1.5
-         Raise :exc:`.ChannelNotFound`, `MessageNotFound` or `ChannelNotReadable` instead of generic :exc:`.BadArgument`
+         Raise :exc:`.ChannelNotFound`, :exc:`.MessageNotFound` or :exc:`.ChannelNotReadable` instead of generic :exc:`.BadArgument`
     """
-
     async def convert(self, ctx, argument):
-        id_regex = re.compile(r'^(?:(?P<channel_id>[0-9]{15,21})-)?(?P<message_id>[0-9]{15,21})$')
-        link_regex = re.compile(
-            r'^https?://(?:(ptb|canary)\.)?discord(?:app)?\.com/channels/'
-            r'(?:([0-9]{15,21})|(@me))'
-            r'/(?P<channel_id>[0-9]{15,21})/(?P<message_id>[0-9]{15,21})/?$'
-        )
-        match = id_regex.match(argument) or link_regex.match(argument)
-        if not match:
-            raise MessageNotFound(argument)
-        message_id = int(match.group("message_id"))
-        channel_id = match.group("channel_id")
+        message_id, channel_id = self._get_id_matches(argument)
         message = ctx.bot._connection._get_message(message_id)
         if message:
             return message
-        channel = ctx.bot.get_channel(int(channel_id)) if channel_id else ctx.channel
+        channel = ctx.bot.get_channel(channel_id) if channel_id else ctx.channel
         if not channel:
             raise ChannelNotFound(channel_id)
         try:
@@ -362,6 +440,7 @@ class CategoryChannelConverter(IDConverter):
 
 class ColourConverter(Converter):
     """Converts to a :class:`~discord.Colour`.
+
     .. versionchanged:: 1.5
         Add an alias named ColorConverter
 
@@ -370,29 +449,76 @@ class ColourConverter(Converter):
     - ``0x<hex>``
     - ``#<hex>``
     - ``0x#<hex>``
+    - ``rgb(<number>, <number>, <number>)``
     - Any of the ``classmethod`` in :class:`Colour`
 
         - The ``_`` in the name can be optionally replaced with spaces.
 
+    Like CSS, ``<number>`` can be either 0-255 or 0-100% and ``<hex>`` can be
+    either a 6 digit hex number or a 3 digit hex shortcut (e.g. #fff).
+
     .. versionchanged:: 1.5
          Raise :exc:`.BadColourArgument` instead of generic :exc:`.BadArgument`
-    """
-    async def convert(self, ctx, argument):
-        arg = argument.replace('0x', '').lower()
 
-        if arg[0] == '#':
-            arg = arg[1:]
+    .. versionchanged:: 1.7
+        Added support for ``rgb`` function and 3-digit hex shortcuts
+    """
+
+    RGB_REGEX = re.compile(r'rgb\s*\((?P<r>[0-9]{1,3}%?)\s*,\s*(?P<g>[0-9]{1,3}%?)\s*,\s*(?P<b>[0-9]{1,3}%?)\s*\)')
+
+    def parse_hex_number(self, argument):
+        arg = ''.join(i * 2 for i in argument) if len(argument) == 3 else argument
         try:
             value = int(arg, base=16)
             if not (0 <= value <= 0xFFFFFF):
-                raise BadColourArgument(arg)
-            return discord.Colour(value=value)
+                raise BadColourArgument(argument)
         except ValueError:
-            arg = arg.replace(' ', '_')
-            method = getattr(discord.Colour, arg, None)
-            if arg.startswith('from_') or method is None or not inspect.ismethod(method):
-                raise BadColourArgument(arg)
-            return method()
+            raise BadColourArgument(argument)
+        else:
+            return discord.Color(value=value)
+
+    def parse_rgb_number(self, argument, number):
+        if number[-1] == '%':
+            value = int(number[:-1])
+            if not (0 <= value <= 100):
+                raise BadColourArgument(argument)
+            return round(255 * (value / 100))
+
+        value = int(number)
+        if not (0 <= value <= 255):
+            raise BadColourArgument(argument)
+        return value
+
+    def parse_rgb(self, argument, *, regex=RGB_REGEX):
+        match = regex.match(argument)
+        if match is None:
+            raise BadColourArgument(argument)
+
+        red = self.parse_rgb_number(argument, match.group('r'))
+        green = self.parse_rgb_number(argument, match.group('g'))
+        blue = self.parse_rgb_number(argument, match.group('b'))
+        return discord.Color.from_rgb(red, green, blue)
+
+    async def convert(self, ctx, argument):
+        if argument[0] == '#':
+            return self.parse_hex_number(argument[1:])
+
+        if argument[0:2] == '0x':
+            rest = argument[2:]
+            # Legacy backwards compatible syntax
+            if rest.startswith('#'):
+                return self.parse_hex_number(rest[1:])
+            return self.parse_hex_number(rest)
+
+        arg = argument.lower()
+        if arg[0:3] == 'rgb':
+            return self.parse_rgb(arg)
+
+        arg = arg.replace(' ', '_')
+        method = getattr(discord.Colour, arg, None)
+        if arg.startswith('from_') or method is None or not inspect.ismethod(method):
+            raise BadColourArgument(arg)
+        return method()
 
 ColorConverter = ColourConverter
 
@@ -445,6 +571,32 @@ class InviteConverter(Converter):
             return invite
         except Exception as exc:
             raise BadInviteArgument() from exc
+
+class GuildConverter(IDConverter):
+    """Converts to a :class:`~discord.Guild`.
+
+    The lookup strategy is as follows (in order):
+
+    1. Lookup by ID.
+    2. Lookup by name. (There is no disambiguation for Guilds with multiple matching names).
+
+    .. versionadded:: 1.7
+    """
+
+    async def convert(self, ctx, argument):
+        match = self._get_id_match(argument)
+        result = None
+
+        if match is not None:
+            guild_id = int(match.group(1))
+            result = ctx.bot.get_guild(guild_id)
+
+        if result is None:
+            result = discord.utils.get(ctx.bot.guilds, name=argument)
+
+            if result is None:
+                raise GuildNotFound(argument)
+        return result
 
 class EmojiConverter(IDConverter):
     """Converts to a :class:`~discord.Emoji`.
@@ -524,11 +676,16 @@ class clean_content(Converter):
         Whether to use nicknames when transforming mentions.
     escape_markdown: :class:`bool`
         Whether to also escape special markdown characters.
+    remove_markdown: :class:`bool`
+        Whether to also remove special markdown characters. This option is not supported with ``escape_markdown``
+        
+        .. versionadded:: 1.7
     """
-    def __init__(self, *, fix_channel_mentions=False, use_nicknames=True, escape_markdown=False):
+    def __init__(self, *, fix_channel_mentions=False, use_nicknames=True, escape_markdown=False, remove_markdown=False):
         self.fix_channel_mentions = fix_channel_mentions
         self.use_nicknames = use_nicknames
         self.escape_markdown = escape_markdown
+        self.remove_markdown = remove_markdown
 
     async def convert(self, ctx, argument):
         message = ctx.message
@@ -579,6 +736,8 @@ class clean_content(Converter):
 
         if self.escape_markdown:
             result = discord.utils.escape_markdown(result)
+        elif self.remove_markdown:
+            result = discord.utils.remove_markdown(result)
 
         # Completely ensure no mentions escape:
         return discord.utils.escape_mentions(result)
